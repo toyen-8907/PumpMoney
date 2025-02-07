@@ -15,7 +15,7 @@ load_dotenv()
 # 現在可以使用 os.getenv() 來訪問環境變數
 WSS_ENDPOINT = os.getenv("WSS_ENDPOINT")
 PUMP_PROGRAM = os.getenv("PUMP_PROGRAM")
-print(WSS_ENDPOINT)
+
 # 使用websocket-client套件的寫法
 
 ssl_context = ssl.create_default_context()
@@ -23,7 +23,7 @@ ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE  # 不驗證 SSL 憑證
 
 ws = websocket.create_connection(
-    "wss://solana-mainnet.core.chainstack.com/846994ce033bba58f0a47c954362cb73",
+    WSS_ENDPOINT,
     sslopt={"cert_reqs": ssl.CERT_NONE}  # 禁用證書驗證
 )
 
