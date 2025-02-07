@@ -10,11 +10,9 @@ from dotenv import load_dotenv
 import os
 import ssl
 import websocket
-load_dotenv()
+from config import WSS_ENDPOINT, PUMP_PROGRAM
 
-# 現在可以使用 os.getenv() 來訪問環境變數
-WSS_ENDPOINT = os.getenv("WSS_ENDPOINT")
-PUMP_PROGRAM = os.getenv("PUMP_PROGRAM")
+
 
 # 使用websocket-client套件的寫法
 
