@@ -7,35 +7,33 @@ import struct
 import sys
 import os
 import ssl
-import websocket
 from typing import Final
-from config import WSS_ENDPOINT, PUMP_PROGRAM
+from config import WSS_ENDPOINT, PUMP_PROGRAM, RPC_ENDPOINT
 from construct import Struct, Int64ul, Flag
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
-from config import RPC_ENDPOINT
-# 使用websocket-client套件的寫法
 
+# SSL 設定
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE  # 不驗證 SSL 憑證
 
-ws = websocket.create_connection(
-    WSS_ENDPOINT,
-    sslopt={"cert_reqs": ssl.CERT_NONE}  # 禁用證書驗證
-)
-
-LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
-TOKEN_DECIMALS: Final[int] = 6
-CURVE_ADDRESS = "   "
-
+# 記錄已經處理過的交易，避免重複輸出
+seen_signatures = set()
+already_subscribed = False  # 避免多次訂閱
 
 # 加載 .env 檔案中的變數
-
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Here and later all the discriminators are precalculated. See learning-examples/discriminator.py
+# 加載 IDL JSON 文件
+with open('pump_fun_idl.json', 'r') as f:
+    idl = json.load(f)
+
+# Bonding Curve 相關參數
+LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
+TOKEN_DECIMALS: Final[int] = 6
+CURVE_ADDRESS = ""
+
 EXPECTED_DISCRIMINATOR: Final[bytes] = struct.pack("<Q", 6966180631402821399)
 
 class BondingCurveState:
@@ -69,14 +67,7 @@ def calculate_bonding_curve_price(curve_state: BondingCurveState) -> float:
 
     return (curve_state.virtual_sol_reserves / LAMPORTS_PER_SOL) / (curve_state.virtual_token_reserves / 10 ** TOKEN_DECIMALS)
 
-
-
-
-# Load the IDL JSON file
-with open('pump_fun_idl.json', 'r') as f:
-    idl = json.load(f)
-
-# Extract the "create" instruction definition
+# 提取 "create" 指令定義
 create_instruction = next(instr for instr in idl['instructions'] if instr['name'] == 'create')
 
 def parse_create_instruction(data):
@@ -85,7 +76,7 @@ def parse_create_instruction(data):
     offset = 8
     parsed_data = {}
 
-    # Parse fields based on CreateEvent structure
+    # 解析 CreateEvent 結構
     fields = [
         ('name', 'string'),
         ('symbol', 'string'),
@@ -112,101 +103,89 @@ def parse_create_instruction(data):
     except:
         return None
 
-def print_transaction_details(log_data):
-    print(f"Signature: {log_data.get('signature')}")
-    
-    for log in log_data.get('logs', []):
-        if log.startswith("Program data:"):
+def process_logs(log_data, logs):
+    """
+    解析交易日誌，避免重複輸出相同的交易數據
+    """
+    signature = log_data.get('signature')
+
+    if signature in seen_signatures:
+        return  # 如果已處理過此交易，則跳過
+
+    seen_signatures.add(signature)
+
+    for log in logs:
+        if "Program data:" in log:
             try:
-                data = base58.b58decode(log.split(": ")[1]).decode('utf-8')
-                print(f"Data: {data}")
-            except:
-                pass
+                encoded_data = log.split(": ")[1]
+                decoded_data = base64.b64decode(encoded_data)
+                parsed_data = parse_create_instruction(decoded_data)
+                
+                if parsed_data and 'name' in parsed_data:
+                    print("Signature:", signature)
+                    for key, value in parsed_data.items():
+                        print(f"{key}: {value}")
+                        
+                        if key == "bondingCurve":
+                            curve_address = value.strip()
+                            print(f"Extracted bondingCurve address: '{curve_address}'")
+                            if len(curve_address) == 44:
+                                asyncio.create_task(fetch_and_print_token_price(curve_address))
+
+            except Exception as e:
+                print(f"Failed to decode: {log}, Error: {e}")
+
+async def fetch_and_print_token_price(curve_address):
+    try:
+        async with AsyncClient(RPC_ENDPOINT) as conn:
+            bonding_curve_state = await get_bonding_curve_state(conn, Pubkey.from_string(curve_address))
+            token_price_sol = calculate_bonding_curve_price(bonding_curve_state)
+            print(f"Token price for {curve_address}: {token_price_sol:.10f} SOL")
+    except Exception as e:
+        print(f"Error fetching bonding curve price: {e}")
 
 async def listen_for_new_tokens():
+    global already_subscribed
     while True:
+        websocket = None
         try:
-            async with websockets.connect(WSS_ENDPOINT, ssl=ssl_context) as websocket:
+            websocket = await websockets.connect(WSS_ENDPOINT, ssl=ssl_context)
+            print("Connected to WebSocket, listening for new token creations...")
+
+            if not already_subscribed:
                 subscription_message = json.dumps({
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "logsSubscribe",
                     "params": [
-                        {"mentions": [str("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")]},
+                        {"mentions": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"]},
                         {"commitment": "processed"}
                     ]
                 })
                 await websocket.send(subscription_message)
-                print(f"Listening for new token creations from program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+                already_subscribed = True
+                print("Subscription sent.")
 
-                # Wait for subscription confirmation
+            while True:
                 response = await websocket.recv()
-                print(f"Subscription response: {response}")
+                data = json.loads(response)
 
-                while True:
-                    try:
-                        response = await websocket.recv()
-                        data = json.loads(response)
+                if 'method' in data and data['method'] == 'logsNotification':
+                    log_data = data['params']['result']['value']
+                    logs = log_data.get('logs', [])
 
-                        if 'method' in data and data['method'] == 'logsNotification':
-                            log_data = data['params']['result']['value']
-                            logs = log_data.get('logs', [])
-                            
-                            if any("Program log: Instruction: Create" in log for log in logs):
-                                for log in logs:
-                                    if "Program data:" in log:
-                                        try:
-                                            encoded_data = log.split(": ")[1]
-                                            decoded_data = base64.b64decode(encoded_data)
+                    if any("Program log: Instruction: Create" in log for log in logs):
+                        process_logs(log_data, logs)
 
-                                            parsed_data = parse_create_instruction(decoded_data)
-                                            if parsed_data and 'name' in parsed_data:
-                                                print("Signature:", log_data.get('signature'))
-                                                for key, value in parsed_data.items():
-                                                    print(f"{key}: {value}")
-                                                    #計算代幣價格
-                                                    if key == "bondingCurve":
-                                                        CURVE_ADDRESS = value.strip()
-                                                        print(f"Extracted bondingCurve address: '{CURVE_ADDRESS}'")
-                                                        print(f"Length: {len(CURVE_ADDRESS)}")
-
-                                                        if len(CURVE_ADDRESS) != 44:
-                                                            print(f"Error: Invalid bondingCurve address length ({len(CURVE_ADDRESS)})")
-                                                            continue  # 跳過這次迴圈，避免錯誤
-
-                                                        try:
-                                                            encoded_data = log.split(": ")[1]
-                                                            decoded_data = base64.b64decode(encoded_data, validate=True)  # 確保 base64 解析正確
-                                                            decoded_string = decoded_data.decode("utf-8", errors="ignore")  # 避免 Unicode 錯誤
-                                                            print(f"Decoded Program Data: {decoded_string}")
-
-                                                            parsed_data = parse_create_instruction(decoded_data)
-                                                            if parsed_data and 'name' in parsed_data:
-                                                                print("Signature:", log_data.get('signature'))
-                                                                for key, value in parsed_data.items():
-                                                                    print(f"{key}: {value}")
-                                                        except base64.binascii.Error as e:
-                                                            print(f"Base64 Decode Error: {e}")
-                                                            continue  # 避免程式崩潰
-                                                        except UnicodeDecodeError as e:
-                                                            print(f"Unicode Decode Error: {e}")
-                                                            continue  # 避免程式崩潰
-
-                                                print("##########################################################################################")
-
-                                                    
-                                               
-                                        except Exception as e:
-                                            print(f"Failed to decode: {log}")
-                                            print(f"Error: {str(e)}")
-                                
-                    except Exception as e:
-                        print(f"An error occurred while processing message: {e}")
-                        break
-
+        except websockets.exceptions.ConnectionClosedError as e:
+            print(f"WebSocket connection closed unexpectedly: {e}")
         except Exception as e:
-            print(f"Connection error: {e}")
-            print("Reconnecting in 5 seconds...")
+            print(f"Unexpected error: {e}")
+        finally:
+            if websocket:
+                await websocket.close()
+                print("WebSocket connection closed. Reconnecting in 5 seconds...")
+            already_subscribed = False  # 只有完全斷線後才允許重新訂閱
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
