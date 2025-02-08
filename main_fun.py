@@ -12,7 +12,7 @@ from config import WSS_ENDPOINT, PUMP_PROGRAM, RPC_ENDPOINT
 from construct import Struct, Int64ul, Flag
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
-
+import time
 # SSL 設定
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
@@ -22,14 +22,7 @@ ssl_context.verify_mode = ssl.CERT_NONE  # 不驗證 SSL 憑證
 seen_signatures = set()
 already_subscribed = False  # 避免多次訂閱
 
-# 加載 .env 檔案中的變數
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# 加載 IDL JSON 文件
-with open('pump_fun_idl.json', 'r') as f:
-    idl = json.load(f)
-
-# Bonding Curve 相關參數
+# Fetch price
 LAMPORTS_PER_SOL: Final[int] = 1_000_000_000
 TOKEN_DECIMALS: Final[int] = 6
 CURVE_ADDRESS = ""
@@ -67,7 +60,11 @@ def calculate_bonding_curve_price(curve_state: BondingCurveState) -> float:
 
     return (curve_state.virtual_sol_reserves / LAMPORTS_PER_SOL) / (curve_state.virtual_token_reserves / 10 ** TOKEN_DECIMALS)
 
-# 提取 "create" 指令定義
+# Load the IDL JSON file
+with open('pump_fun_idl.json', 'r') as f:
+    idl = json.load(f)
+
+# Extract the "create" instruction definition
 create_instruction = next(instr for instr in idl['instructions'] if instr['name'] == 'create')
 
 def parse_create_instruction(data):
@@ -76,7 +73,7 @@ def parse_create_instruction(data):
     offset = 8
     parsed_data = {}
 
-    # 解析 CreateEvent 結構
+    # Parse fields based on CreateEvent structure
     fields = [
         ('name', 'string'),
         ('symbol', 'string'),
@@ -103,90 +100,84 @@ def parse_create_instruction(data):
     except:
         return None
 
-def process_logs(log_data, logs):
-    """
-    解析交易日誌，避免重複輸出相同的交易數據
-    """
-    signature = log_data.get('signature')
-
-    if signature in seen_signatures:
-        return  # 如果已處理過此交易，則跳過
-
-    seen_signatures.add(signature)
-
-    for log in logs:
-        if "Program data:" in log:
-            try:
-                encoded_data = log.split(": ")[1]
-                decoded_data = base64.b64decode(encoded_data)
-                parsed_data = parse_create_instruction(decoded_data)
-                
-                if parsed_data and 'name' in parsed_data:
-                    print("Signature:", signature)
-                    for key, value in parsed_data.items():
-                        print(f"{key}: {value}")
-                        
-                        if key == "bondingCurve":
-                            curve_address = value.strip()
-                            print(f"Extracted bondingCurve address: '{curve_address}'")
-                            if len(curve_address) == 44:
-                                asyncio.create_task(fetch_and_print_token_price(curve_address))
-
-            except Exception as e:
-                print(f"Failed to decode: {log}, Error: {e}")
-
-async def fetch_and_print_token_price(curve_address):
-    try:
-        async with AsyncClient(RPC_ENDPOINT) as conn:
-            bonding_curve_state = await get_bonding_curve_state(conn, Pubkey.from_string(curve_address))
-            token_price_sol = calculate_bonding_curve_price(bonding_curve_state)
-            print(f"Token price for {curve_address}: {token_price_sol:.10f} SOL")
-    except Exception as e:
-        print(f"Error fetching bonding curve price: {e}")
-
 async def listen_for_new_tokens():
-    global already_subscribed
-    while True:
-        websocket = None
-        try:
-            websocket = await websockets.connect(WSS_ENDPOINT, ssl=ssl_context)
-            print("Connected to WebSocket, listening for new token creations...")
+    websocket = None  # 初始化 WebSocket 變數
+    try:
+        while True:
+            try:
+                websocket = await websockets.connect(WSS_ENDPOINT, ssl=ssl_context)
+                print("Connected to WebSocket, listening for new token creations...")
 
-            if not already_subscribed:
                 subscription_message = json.dumps({
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "logsSubscribe",
                     "params": [
-                        {"mentions": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"]},
+                        {"mentions": [str("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")]},
                         {"commitment": "processed"}
                     ]
                 })
                 await websocket.send(subscription_message)
-                already_subscribed = True
                 print("Subscription sent.")
 
-            while True:
-                response = await websocket.recv()
-                data = json.loads(response)
+                while True:
+                    response = await websocket.recv()
+                    data = json.loads(response)
 
-                if 'method' in data and data['method'] == 'logsNotification':
-                    log_data = data['params']['result']['value']
-                    logs = log_data.get('logs', [])
+                    if 'method' in data and data['method'] == 'logsNotification':
+                        log_data = data['params']['result']['value']
+                        logs = log_data.get('logs', [])
 
-                    if any("Program log: Instruction: Create" in log for log in logs):
-                        process_logs(log_data, logs)
+                        if any("Program log: Instruction: Create" in log for log in logs):
+                            for log in logs:
+                                if "Program data:" in log:
+                                    try:
+                                        encoded_data = log.split(": ")[1]
+                                        decoded_data = base64.b64decode(encoded_data)
+                                        parsed_data = parse_create_instruction(decoded_data)
+                                        if parsed_data and 'name' in parsed_data:
+                                            print("Signature:", log_data.get('signature'))
+                                            for key, value in parsed_data.items():
+                                                print(f"{key}: {value}")
+                                                if key == "bondingCurve":
+                                                    CURVE_ADDRESS = value
+                                                    if CURVE_ADDRESS and len(CURVE_ADDRESS) == 44:
+                                                        try:
+                                                            async with AsyncClient(RPC_ENDPOINT) as conn:
+                                                                print("Fetching account info for:", CURVE_ADDRESS)
+                                                                curve_address = Pubkey.from_string(CURVE_ADDRESS)
+                                                                print("comfirmed trans to curve_address")
+                                                                
+                                                                print("start trans to bonding_curve_state")                                                                                                   
+                                                                bonding_curve_state = await get_bonding_curve_state(conn, curve_address)
+                                                                print("start to token_price_sol") 
+                                                                token_price_sol = calculate_bonding_curve_price(bonding_curve_state)
+                                                                print("Token price:")
+                                                                print(f"  {token_price_sol:.10f} SOL")
+                                                        except ValueError as e:
+                                                            print(f"Error: {repr(e)}")
+                                                        except Exception as e:
+                                                            print(f"An unexpected error occurred at fetching price: {repr(e)}")
+                                            print("-------------------------------------------------------------------------------------------")
+                                    except Exception as e:
+                                        print(f"Failed to decode: {log}")
+                                        print(f"Error: {str(e)}")
 
-        except websockets.exceptions.ConnectionClosedError as e:
-            print(f"WebSocket connection closed unexpectedly: {e}")
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-        finally:
-            if websocket:
-                await websocket.close()
-                print("WebSocket connection closed. Reconnecting in 5 seconds...")
-            already_subscribed = False  # 只有完全斷線後才允許重新訂閱
-            await asyncio.sleep(5)
+            except websockets.exceptions.ConnectionClosedError as e:
+                print(f"WebSocket connection closed unexpectedly: {e}")
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+            finally:
+                if websocket:
+                    await websocket.close()
+                    print("WebSocket connection closed. Reconnecting in 5 seconds...")
+                await asyncio.sleep(5)
+
+    except KeyboardInterrupt:
+        print("\nKeyboardInterrupt detected. Closing WebSocket connection and exiting...")
+        if websocket:
+            await websocket.close()
+        sys.exit(0)
 
 if __name__ == "__main__":
     asyncio.run(listen_for_new_tokens())
