@@ -165,23 +165,33 @@ async def listen_for_new_tokens():
                                                 for key, value in parsed_data.items():
                                                     print(f"{key}: {value}")
                                                     #計算代幣價格
-                                                    if key == "bondingCurve":    
-                                                                                                  
-                                                        CURVE_ADDRESS = value
-                                                        print(f"Extracted bondingCurve address: '{CURVE_ADDRESS}'")  # 加上單引號看是否有多餘空格
+                                                    if key == "bondingCurve":
+                                                        CURVE_ADDRESS = value.strip()
+                                                        print(f"Extracted bondingCurve address: '{CURVE_ADDRESS}'")
                                                         print(f"Length: {len(CURVE_ADDRESS)}")
 
-                                                        if CURVE_ADDRESS:
-                                                            try:
-                                                                async with AsyncClient(RPC_ENDPOINT) as conn:
-                                                                    curve_address = Pubkey.from_string(CURVE_ADDRESS)
-                                                                    bonding_curve_state = await get_bonding_curve_state(conn, curve_address)
-                                                                    token_price_sol = calculate_bonding_curve_price(bonding_curve_state)
+                                                        if len(CURVE_ADDRESS) != 44:
+                                                            print(f"Error: Invalid bondingCurve address length ({len(CURVE_ADDRESS)})")
+                                                            continue  # 跳過這次迴圈，避免錯誤
 
-                                                                    print("Token price:")
-                                                                    print(f"  {token_price_sol:.10f} SOL")
-                                                            except ValueError as e:
-                                                                print(f"Error: {e}")
+                                                        try:
+                                                            encoded_data = log.split(": ")[1]
+                                                            decoded_data = base64.b64decode(encoded_data, validate=True)  # 確保 base64 解析正確
+                                                            decoded_string = decoded_data.decode("utf-8", errors="ignore")  # 避免 Unicode 錯誤
+                                                            print(f"Decoded Program Data: {decoded_string}")
+
+                                                            parsed_data = parse_create_instruction(decoded_data)
+                                                            if parsed_data and 'name' in parsed_data:
+                                                                print("Signature:", log_data.get('signature'))
+                                                                for key, value in parsed_data.items():
+                                                                    print(f"{key}: {value}")
+                                                        except base64.binascii.Error as e:
+                                                            print(f"Base64 Decode Error: {e}")
+                                                            continue  # 避免程式崩潰
+                                                        except UnicodeDecodeError as e:
+                                                            print(f"Unicode Decode Error: {e}")
+                                                            continue  # 避免程式崩潰
+
                                                 print("##########################################################################################")
 
                                                     
