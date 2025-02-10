@@ -1,3 +1,5 @@
+README
+
 
 
 
@@ -13,3 +15,11 @@ docker run：用來啟動一個新的 Docker 容器。
 -d：讓容器在 背景（detached mode） 運行，而不是前台佔用終端機。
 --name solana_bot：指定 容器名稱 為 solana_bot，這樣可以方便管理和識別容器。
 my_solana_bot：指定要運行的 Docker 映像（image），這是你先前用 docker build -t my_solana_bot . 建立的映像。
+
+
+
+這是從block裡面去用anchor找特定活動的數字碼
+# global:buy discriminator - 16927863322537952870
+# global:sell discriminator - 12502976635542562355
+# global:create discriminator - 8576854823835016728
+# account:BondingCurve discriminator - 6966180631402821399

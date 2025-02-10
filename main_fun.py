@@ -385,46 +385,56 @@ async def listen_for_create_transaction(websocket):
         
         
 async def main_fun():
-    websocket = await connect_websocket()  # 直接 await 連線
     global api_counter
-    try:
-        while True:
-            print("🤖 🤖 🤖 等待新代幣創建...")
-            try:
-                token_data = await listen_for_create_transaction_blocksubscribe(websocket)
-            except RuntimeError as e:
-                print(f"🚨 {e}，暫停 1 秒後繼續...")
-                await asyncio.sleep(1)
-            print("新代幣💰 💰 💰: -----------------------------------------------------------------")
-            print(json.dumps(token_data, indent=2))
+    while True:
+        try:
+            websocket = await connect_websocket(max_size=2**20, compression=None)
+            print("✅ WebSocket 連線成功")
 
-            mint = Pubkey.from_string(token_data['mint'])
-            bonding_curve = Pubkey.from_string(token_data['bondingCurve'])
-            associated_bonding_curve = Pubkey.from_string(token_data['associatedBondingCurve'])
-            api_counter += 5.1
-            if api_counter >=5:
-                await asyncio.sleep(1)
-                api_counter = 0
-            # 獲取代幣價格
-            async with AsyncClient(RPC_ENDPOINT_2) as client:
+            while True:
                 try:
-                    curve_state = await get_pump_curve_state(client, bonding_curve)
-                    if curve_state is None:
-                        print(f"代幣 {token_data['symbol']} 尚未有人購買")
-                        continue
-                    token_price_sol = calculate_pump_curve_price(curve_state)
-                    print(f"Bonding curve address: {bonding_curve}")
-                    print(f"💵 代幣價格: {token_price_sol:.10f} SOL")
-                except RuntimeError as e:
-                    print(f"🚨 {e}，暫停 1 秒後繼續...")
-                    await asyncio.sleep(1)
-            
-    except websockets.exceptions.ConnectionClosed:
-        print("WebSocket connection closed. Reconnecting...")
-        await main_fun()  # 當 WebSocket 斷開時，重新執行 main_fun()
-    finally:
-        await websocket.close()  # 確保 WebSocket 連線被關閉
+                    print("🤖 等待新代幣創建...")
+                    token_data = await listen_for_create_transaction_blocksubscribe(websocket)
 
+                    print("新代幣💰: --------------------------------------")
+                    print(json.dumps(token_data, indent=2))
+
+                    mint = Pubkey.from_string(token_data['mint'])
+                    bonding_curve = Pubkey.from_string(token_data['bondingCurve'])
+                    associated_bonding_curve = Pubkey.from_string(token_data['associatedBondingCurve'])
+                    api_counter += 5.1
+
+                    if api_counter >= 5:
+                        await asyncio.sleep(1)
+                        api_counter = 0
+
+                    async with AsyncClient(RPC_ENDPOINT_2) as client:
+                        try:
+                            curve_state = await get_pump_curve_state(client, bonding_curve)
+                            if curve_state is None:
+                                print(f"代幣 {token_data['symbol']} 尚未有人購買")
+                                continue
+
+                            token_price_sol = calculate_pump_curve_price(curve_state)
+                            print(f"Bonding curve address: {bonding_curve}")
+                            print(f"💵 代幣價格: {token_price_sol:.10f} SOL")
+
+                        except RuntimeError as e:
+                            print(f"🚨 {e}，暫停 1 秒後繼續...")
+                            await asyncio.sleep(1)
+
+                except IndexError as e:
+                    print(f"⚠️ 交易索引錯誤: {e}")
+                except RuntimeError as e:
+                    print(f"🚨 遇到錯誤: {e}，暫停 3 秒後繼續...")
+                    await asyncio.sleep(3)
+
+        except websockets.exceptions.ConnectionClosedError:
+            print("⚠️ WebSocket 連線中斷，等待 5 秒後重新連線...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"❌ 無法建立 WebSocket 連線: {e}，等待 10 秒後重試...")
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main_fun())
