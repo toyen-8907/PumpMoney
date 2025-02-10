@@ -240,10 +240,11 @@ def print_transaction_details(log_data):
 # ------------------------            
 async def connect_websocket():
     return await websockets.connect(WSS_ENDPOINT, ssl=ssl_context)
+
 async def listen_for_create_transaction_blocksubscribe(websocket):
     idl = load_idl('pump_fun_idl.json')
     create_discriminator = 8576854823835016728
-    print(f"decode_create_instruction in globals: {'decode_create_instruction' in globals()}")
+    # print(f"decode_create_instruction in globals: {'decode_create_instruction' in globals()}")
 
     subscription_message = json.dumps({
         "jsonrpc": "2.0",
@@ -294,7 +295,10 @@ async def listen_for_create_transaction_blocksubscribe(websocket):
                                             
                                             if discriminator == create_discriminator:
                                                 create_ix = next(instr for instr in idl['instructions'] if instr['name'] == 'create')
-                                                account_keys = [str(transaction.message.account_keys[index]) for index in ix.accounts]
+                                                account_keys = [
+                                                    str(transaction.message.account_keys[index]) 
+                                                    for index in ix.accounts if index < len(transaction.message.account_keys)
+                                                ]
                                                 decoded_args = decode_create_instruction(ix_data, create_ix, account_keys)
                                                 return decoded_args
         except httpx.HTTPStatusError as e:
@@ -397,9 +401,12 @@ async def main_fun():
             mint = Pubkey.from_string(token_data['mint'])
             bonding_curve = Pubkey.from_string(token_data['bondingCurve'])
             associated_bonding_curve = Pubkey.from_string(token_data['associatedBondingCurve'])
-
+            api_counter += 5.1
+            if api_counter >=5:
+                await asyncio.sleep(1)
+                api_counter = 0
             # 獲取代幣價格
-            async with AsyncClient(RPC_ENDPOINT) as client:
+            async with AsyncClient(RPC_ENDPOINT_2) as client:
                 try:
                     curve_state = await get_pump_curve_state(client, bonding_curve)
                     if curve_state is None:
@@ -411,10 +418,7 @@ async def main_fun():
                 except RuntimeError as e:
                     print(f"🚨 {e}，暫停 1 秒後繼續...")
                     await asyncio.sleep(1)
-            api_counter += 5.1
-            if api_counter >=5:
-                await asyncio.sleep(0.5)
-                api_counter = 0
+            
     except websockets.exceptions.ConnectionClosed:
         print("WebSocket connection closed. Reconnecting...")
         await main_fun()  # 當 WebSocket 斷開時，重新執行 main_fun()
