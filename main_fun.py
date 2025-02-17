@@ -315,7 +315,7 @@ async def listen_for_create_transaction_blocksubscribe(websocket):
             
             
 async def listen_for_create_transaction(websocket):
-    idl = load_idl('idl/pump_fun_idl.json')
+    idl = load_idl('pump_fun_idl.json')
     create_discriminator = 8576854823835016728
     
     subscription_message = json.dumps({

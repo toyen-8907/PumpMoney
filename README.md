@@ -6,7 +6,7 @@ README
 當 Docker 容器啟動後，你可以使用以下幾種方式來即時查看輸出，而不是等到報錯才看到內容：
 
 1. docker build -t my_solana_bot .
-2. docker run -d --name solana_bot my_solana_bot
+2. docker run --rm -it my_solana_bot
 3. docker logs -f solana_bot
 
 🛠 指令解析
